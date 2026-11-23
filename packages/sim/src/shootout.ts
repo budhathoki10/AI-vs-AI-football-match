@@ -91,7 +91,7 @@ export function simulateAttempt(taker: { shooting: number; ballControl: number }
   return { result: result ?? 'missed', frames, woodwork: wood, ballSpeed, target };
 }
 
-export async function runShootout(match: Match, opts: { firstTeam?: TeamId; suddenDeathMax?: number; simulate?: typeof simulateAttempt } = {}): Promise<ShootoutResult> {
+export async function runShootout(match: Match, opts: { firstTeam?: TeamId; suddenDeathMax?: number; simulate?: typeof simulateAttempt; onAttempt?: (a: PenaltyAttempt) => void | Promise<void> } = {}): Promise<ShootoutResult> {
   const rng = new Rng(match.cfg.seed ^ 0x5eed);
   const first: TeamId = opts.firstTeam ?? (rng.next() < 0.5 ? 'A' : 'B'); // coin toss, recorded in the result
   const maxSD = opts.suddenDeathMax ?? SHOOTOUT.suddenDeathMaxRounds;
@@ -137,6 +137,7 @@ export async function runShootout(match: Match, opts: { firstTeam?: TeamId; sudd
     if (!stats[opp].keepersUsed.includes(keeper.cfg.id)) stats[opp].keepersUsed.push(keeper.cfg.id);
     history.push({ team, takerId: taker.cfg.id, result: sim.result, side: sd1.side! });
     attempts.push({ index: attempts.length + 1, round, team, suddenDeath: sd, takerId: taker.cfg.id, keeperId: keeper.cfg.id, shot: { side: sd1.side!, height: sd1.height!, power: sd1.power!, reason: sd1.reason?.slice(0, 200) ?? '', usedFallback: fbS1 }, keeper: { dive: kd.dive ?? 0, reactDelay: kd.reactDelay ?? 0, reason: kd.reason?.slice(0, 200) ?? '', usedFallback: fbK1 }, result: sim.result, scoreAfter: [score[0], score[1]], frames: sim.frames, woodwork: sim.woodwork, ballSpeed: sim.ballSpeed, ballTarget: sim.target });
+    await opts.onAttempt?.(attempts[attempts.length - 1]);
     await sleepTick();
   };
 
