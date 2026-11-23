@@ -42,6 +42,10 @@ describe('shootout state machine', () => {
     const r = await runShootout(m, { firstTeam: 'A', simulate: script(['goal', 'missed', 'goal', 'missed', 'goal', 'missed', 'goal']) });
     expect(r.decidedBy).toBe('early_termination'); expect(r.winner).toBe('A'); expect(r.attempts.length).toBe(6); expect(r.score).toEqual([3, 0]);
   });
+  it('a shootout that runs the full five rounds is not labelled early termination', async () => {
+    const m = await drawnMatch(); const r = await runShootout(m, { firstTeam: 'A', simulate: script(['goal', 'goal', 'goal', 'missed', 'goal', 'goal', 'missed', 'goal', 'goal', 'missed']) });
+    expect(r.attempts.length).toBe(10); expect(r.score).toEqual([4, 3]); expect(r.decidedBy).toBe('regulation_rounds');
+  });
   it('sudden death: ends only when exactly one team scores in the same round; both-miss continues', async () => {
     const m = await drawnMatch();
     const seq: PenaltyResult[] = [...Array(10).fill('goal'), 'missed', 'missed', 'saved', 'goal', 'goal', 'saved'];

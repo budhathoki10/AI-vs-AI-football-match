@@ -6,13 +6,13 @@ import { decryptSecret, encryptSecret, hashPassword, loadCredentialKey, verifyPa
 import type { FastifyInstance } from 'fastify';
 
 const key = randomBytes(32);
-let app: FastifyInstance; let db: ReturnType<typeof openDb>; let runner: any;
+let app: FastifyInstance; let db: ReturnType<typeof openDb>;
 const fakeFetch = async (url: string, init: any) => {
   if (init.method === 'GET') return { ok: true, status: 200, json: async () => ({ data: [{ id: 'gpt-x' }] }), text: async () => '' };
   const body = JSON.parse(init.body); void body;
   return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{"bogus":true}' } }], usage: { prompt_tokens: 120, completion_tokens: 30 } }), text: async () => '' };
 };
-beforeAll(async () => { db = openDb(':memory:'); ({ app, runner } = await buildApp({ db, key, fetchImpl: fakeFetch })); });
+beforeAll(async () => { db = openDb(':memory:'); ({ app } = await buildApp({ db, key, fetchImpl: fakeFetch })); });
 afterAll(async () => { await app.close(); });
 
 let ipN = 0;

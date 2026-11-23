@@ -235,7 +235,7 @@ export class Match {
       return [gx + (gx > 0 ? -1.2 : 1.2), clamp(r.z * 0.12, -1.2, 1.2), 0.7];
     }
     const attackingSide = r.team === p.team;
-    let [u, v] = this.roleTarget(t, p, attackingSide);
+    const [u, v] = this.roleTarget(t, p, attackingSide);
     let [x, z] = this.toWorld(p.team, u, v);
     if (attackingSide && r.type !== 'kickoff') { // support the taker within 5–9m
       const ang = (p.idx * 2.1) + 0.6; x = clamp(r.x + Math.cos(ang) * 6 * -this.teams[r.team].dir * -1, -halfL + 2, halfL - 2); z = clamp(r.z - Math.sign(r.z || 1) * (3 + (p.idx % 3) * 3), -halfW + 1, halfW - 1);

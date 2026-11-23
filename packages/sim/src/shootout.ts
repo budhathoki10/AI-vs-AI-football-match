@@ -24,7 +24,7 @@ const sleepTick = () => new Promise<void>((r) => setImmediate(r));
 const clamp = (x: number, a: number, b: number) => Math.max(a, Math.min(b, x));
 
 async function ask<T>(f: (() => T | Promise<T>) | undefined, fb: () => T): Promise<{ v: T; fallback: boolean }> {
-  if (!f) return { v: fb(), fallback: true };
+  if (!f) return { v: fb(), fallback: false }; // agent has no custom penalty logic: the documented default policy is its policy
   try { return { v: await f(), fallback: false }; } catch { return { v: fb(), fallback: true }; }
 }
 
@@ -54,7 +54,6 @@ export function simulateAttempt(taker: { shooting: number; ballControl: number }
         kicked = true; tKick = t; kickStep = i; ballSpeed = speed; target = { z: zt, y: yt };
       }
     }
-    const ks = w.playerState('K');
     if (!diveDone && (dive.dive !== 0 || keeperSkill > 0.3)) {
       const anticipate = dive.reactDelay < 0 && !kicked && Math.hypot(bs0.x - ts.x, bs0.z - ts.z) < 1.3;
       const afterKick = kicked && t - tKick >= Math.max(0, dive.reactDelay) + 0.06 * (1 - keeperSkill);
@@ -147,8 +146,9 @@ export async function runShootout(match: Match, opts: { firstTeam?: TeamId; sudd
       await kickOne(team, round, false); rounds = round;
       const a = score[0], b = score[1];
       const remA = SHOOTOUT.regularRounds - stats.A.attempts, remB = SHOOTOUT.regularRounds - stats.B.attempts;
-      if (a > b + remB) { winner = 'A'; decidedBy = 'early_termination'; break outer; }
-      if (b > a + remA) { winner = 'B'; decidedBy = 'early_termination'; break outer; }
+      const attemptsLeft = remA + remB > 0; // a fully played 5-round shootout is 'regulation_rounds', not early
+      if (a > b + remB) { winner = 'A'; decidedBy = attemptsLeft ? 'early_termination' : 'regulation_rounds'; break outer; }
+      if (b > a + remA) { winner = 'B'; decidedBy = attemptsLeft ? 'early_termination' : 'regulation_rounds'; break outer; }
     }
   }
   void remaining;
