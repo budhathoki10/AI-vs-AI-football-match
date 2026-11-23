@@ -1,0 +1,24 @@
+{
+  "name": "ai-futsal-arena",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "test": "npm run test -w @futsal/sim && npm run test -w @futsal/server",
+    "typecheck": "npm run typecheck -w @futsal/sim && npm run typecheck -w @futsal/server && npm run typecheck -w @futsal/web",
+    "lint": "eslint .",
+    "build": "npm run build -w @futsal/web",
+    "dev:server": "npm run dev -w @futsal/server",
+    "dev:web": "npm run dev -w @futsal/web"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^2.1.0",
+    "tsx": "^4.19.0"
+  },
+  "engines": { "node": ">=22.5" }
+}
