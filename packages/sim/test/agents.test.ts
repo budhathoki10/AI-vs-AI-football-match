@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ARCHITECTURES, makeAlgorithmicAgent, makeTeam, validateTactics, defaultTactics, Match, makeMatchConfig, initPhysics, _internal, type CompactState, type TeamAgent, type AgentDecision } from '../src';
+import { HoldAgent, makeTeam, validateTactics, defaultTactics, Match, makeMatchConfig, initPhysics, type CompactState, type TeamAgent, type AgentDecision } from '../src';
 
 const team = makeTeam('A', 'Test', { seed: 3 });
 const mkState = (o: Partial<CompactState> = {}): CompactState => ({
@@ -10,27 +10,15 @@ const mkState = (o: Partial<CompactState> = {}): CompactState => ({
 });
 const on = team.players.slice(0, 5).map((p) => p.id), bench = team.players.slice(5).map((p) => p.id);
 
-describe('decision architectures', () => {
-  for (const a of ARCHITECTURES.filter((x) => x !== 'llm')) {
-    it(`${a}: returns valid tactics through the shared interface for several situations`, async () => {
-      const ag = makeAlgorithmicAgent(a);
-      for (const s of [mkState(), mkState({ scoreOwn: 2, scoreOpp: 0, minute: 80, minutesLeft: 10 }), mkState({ scoreOwn: 0, scoreOpp: 2, minute: 88, minutesLeft: 2 }), mkState({ redOwn: 1, avgStamina: 0.3 })]) {
-        const d = await ag.decide(s, team); const v = validateTactics(d.tactics, team, on, bench);
-        expect(v.errors).toEqual([]); expect(v.ok).toBe(true);
-      }
-    });
-  }
-  it('architectures behave differently when trailing late vs leading late', () => {
-    for (const a of ['rule', 'fsm', 'behavior_tree', 'utility', 'goap', 'hybrid'] as const) {
-      const ag = makeAlgorithmicAgent(a);
-      const trail = (ag.decide(mkState({ scoreOwn: 0, scoreOpp: 2, minute: 82, minutesLeft: 8 }), team) as AgentDecision).tactics as any;
-      const lead = (ag.decide(mkState({ scoreOwn: 2, scoreOpp: 0, minute: 82, minutesLeft: 8 }), team) as AgentDecision).tactics as any;
-      expect(trail.riskLevel).toBeGreaterThan(lead.riskLevel); expect(trail.pressingIntensity).toBeGreaterThan(lead.pressingIntensity);
-    }
+describe('no built-in tactical AI', () => {
+  it('a team without a model keeps the default tactics and never decides on its own', async () => {
+    await initPhysics();
+    const m = await Match.create(makeMatchConfig({ seed: 5, minutes: 1 })); await m.runRegulation();
+    expect(m.teams.A.tactics.teamStrategy).toBe(defaultTactics(team).teamStrategy); expect(m.decisions.every((d) => !d.accepted || d.meta.source === 'none')).toBe(true);
+    expect(m.teams.A.tactics.formation).toBe(defaultTactics(team).formation);
   });
-  it('GOAP planner finds a multi-step plan', () => {
-    const plan = _internal.plan({ tired: true, control: false, regained: false, chance: false }, { chance: true });
-    expect(plan!.length).toBeGreaterThanOrEqual(2);
+  it('HoldAgent decides nothing new', async () => {
+    const d = await new HoldAgent().decide(mkState()); expect(validateTactics(d.tactics, team, on, bench).ok).toBe(true); expect((d.tactics as any).formation).toBe(defaultTactics(team).formation);
   });
 });
 
@@ -55,7 +43,7 @@ describe('structured output validation', () => {
 });
 
 describe('team-agent orchestration inside the match', () => {
-  it('invalid / failing / hanging LLM-style agents never crash or block; the fallback is used and logged', async () => {
+  it('invalid / failing / hanging LLM-style agents never crash or block; the team keeps its current tactics and the failure is logged', async () => {
     await initPhysics();
     const invalid: TeamAgent = { architecture: 'llm', cooldownVirtual: 60, intervalVirtual: 300, decide: () => ({ tactics: { formation: 'bogus' }, meta: { source: 'llm:test' } }) };
     const hang: TeamAgent = { architecture: 'llm', cooldownVirtual: 60, intervalVirtual: 300, decide: () => new Promise<AgentDecision>(() => {}) };
@@ -63,7 +51,7 @@ describe('team-agent orchestration inside the match', () => {
     await m.runRegulation();
     expect(m.phase).toBe('full_time'); expect(m.vt).toBe(5400);
     const a = m.decisions.filter((d) => d.team === 'A'); expect(a.length).toBeGreaterThan(2);
-    expect(a.every((d) => !d.accepted && d.rejectReason && d.meta.source.endsWith('->fallback') && d.tactics !== null)).toBe(true);
+    expect(a.every((d) => !d.accepted && d.rejectReason && d.tactics === null)).toBe(true); expect(m.teams.A.tactics.formation).toBe(defaultTactics(team).formation);
     expect(m.teams.A.cost.failures).toBeGreaterThan(0);
     expect(m.decisions.filter((d) => d.team === 'B').length).toBe(0); // hanging agent: still only its cached initial tactics
   });
@@ -81,7 +69,7 @@ describe('team-agent orchestration inside the match', () => {
   });
   it('records decision review data with outcomes and cost/token meta', async () => {
     await initPhysics();
-    const tracked: TeamAgent = { architecture: 'llm', cooldownVirtual: 60, intervalVirtual: 240, decide: (s, t) => { const d = makeAlgorithmicAgent('rule').decide(s, t) as AgentDecision; return { tactics: d.tactics, meta: { source: 'llm:test', tokensIn: 400, tokensOut: 90, costUsd: 0.001, latencyMs: 800 } }; } };
+    const tracked: TeamAgent = { architecture: 'llm', cooldownVirtual: 60, intervalVirtual: 240, decide: (s) => { return { tactics: { ...s.current, riskLevel: 0.6, reasonSummary: 'test decision' }, meta: { source: 'llm:test', tokensIn: 400, tokensOut: 90, costUsd: 0.001, latencyMs: 800 } }; } };
     const m = await Match.create(makeMatchConfig({ seed: 4, minutes: 1 }), { A: tracked }); await m.runRegulation();
     const acc = m.decisions.filter((d) => d.team === 'A' && d.accepted); expect(acc.length).toBeGreaterThan(5);
     expect(acc[0].outcome).toMatch(/next 5 virtual min/); expect(acc[0].state.minute).toBeGreaterThanOrEqual(0);

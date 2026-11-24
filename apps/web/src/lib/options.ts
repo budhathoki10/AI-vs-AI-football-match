@@ -1,3 +1,0 @@
-export const ARCH_OPTS: [string, string][] = [['hybrid', 'Hybrid AI (utility + guard rails)'], ['rule', 'Rule-based AI'], ['fsm', 'Finite State Machine'], ['behavior_tree', 'Behavior Tree'], ['utility', 'Utility-based AI'], ['goap', 'Goal-Oriented Action Planning'], ['llm', 'LLM team agent (needs API key)']];
-export const DURATIONS = [1, 2, 3, 4, 5, 6] as const;
-export const defaultTeam = (name: string, color: string) => ({ name, formation: '2-2', attackingStyle: 'possession', defensiveStyle: 'mid_block', architecture: 'hybrid', provider: '', model: '', tacticalInstructions: '', primaryColor: color });

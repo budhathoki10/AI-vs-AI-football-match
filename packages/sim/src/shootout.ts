@@ -45,8 +45,9 @@ export function simulateAttempt(taker: { shooting: number; ballControl: number }
       const d = Math.hypot(bs0.x - ts.x, bs0.z - ts.z);
       w.accelPlayer('T', clamp((bs0.x - ts.x) * 3 - ts.vx * 1.0, -5, 5), clamp((bs0.z - ts.z) * 3 - ts.vz, -5, 5));
       if (d < 0.62 && t > 0.35) {
-        const zt = clamp(shot.side, -1, 1) * 1.2 + rng.gauss() * ((1 - sh) * 0.28 + 0.06 + shot.power * 0.08);
-        const yt = 0.12 + clamp(shot.height, 0, 1) * 1.6 + rng.gauss() * ((1 - sh) * 0.16 + 0.04);
+        // execution error grows with power and falls with shooting skill: aiming for the corner of the goal genuinely risks missing wide or hitting the post
+        const zt = clamp(shot.side, -1, 1) * 1.2 + rng.gauss() * ((1 - sh) * 0.35 + 0.12 + shot.power * 0.18);
+        const yt = 0.12 + clamp(shot.height, 0, 1) * 1.6 + rng.gauss() * ((1 - sh) * 0.22 + 0.07 + shot.power * 0.08);
         const speed = 11 + 13 * clamp(shot.power, 0.3, 1) * (0.55 + 0.45 * sh);
         const dx = goalX - bs0.x; const horiz = Math.hypot(dx, zt - bs0.z); const tt = horiz / speed;
         const vy = clamp((yt - bs0.y + 0.5 * 9.81 * tt * tt) / tt, 0, 8);
@@ -61,7 +62,7 @@ export function simulateAttempt(taker: { shooting: number; ballControl: number }
         let zTarget = dive.dive * 1.15;
         if (kicked) { // the keeper can read the shot once struck: blend towards the real trajectory crossing
           const b = w.ballState(); const tt = (goalX - b.x) / Math.max(b.vx, 0.1); const zc = b.z + b.vz * tt;
-          const read = clamp(keeperSkill * 0.65 - (dive.reactDelay > 0.12 ? 0.2 : 0), 0, 0.85);
+          const read = clamp(keeperSkill * 0.5 - (dive.reactDelay > 0.12 ? 0.2 : 0), 0, 0.85);
           zTarget = dive.dive === 0 ? zc * read : zTarget * (1 - read) + zc * read;
         }
         const maxV = 4.5 + 4.0 * (keeper.agility / 100) * (0.55 + 0.45 * keeperSkill);

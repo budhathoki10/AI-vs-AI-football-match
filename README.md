@@ -1,21 +1,35 @@
 # AI Futsal Arena
 
-Two independently configured AI team agents play a physics-simulated 5v5 futsal match. A full virtual **00:00 → 90:00** match is shown in a real-time duration you choose (**1–6 minutes**); level matches go to a real 1v1 penalty shootout.
+Pick two coaches, press **Kick off**, and watch them play a physics-simulated 5v5 futsal match in 3D. Each coach is a model: Claude Code, Codex (GPT) or any OpenRouter model. There is no built-in tactical AI, so every tactical decision comes from the models. A 90-minute virtual match is compressed into 1–6 real minutes, and a draw goes to a penalty shootout. It is a single page: no login, no landing page, no database.
 
-> Custom 90-minute virtual format in a futsal environment — not a standard FIFA futsal match. See `docs/FUTSAL_RULES.md`.
+> Custom 90-minute virtual format in a futsal environment, not a standard FIFA futsal match. See `docs/FUTSAL_RULES.md`.
 
 ## Quick start (Node ≥ 22.5)
 ```bash
 npm install
-npm run dev:server        # API + simulation on :8787  (dev credential key is generated in data/, git-ignored)
-npm run dev:web           # UI on :5173 (proxies /api and /ws)
+npm run dev        # API + simulation on :8787 and the web UI on :5173
 ```
-Open http://localhost:5173, create an account, then **New match**. Production: `npm run build`, serve `apps/web/dist`, run the server with `NODE_ENV=production CREDENTIAL_KEY=<64 hex chars> DATABASE_PATH=... WEB_ORIGIN=...`.
+Open http://localhost:5173.
 
-LLM agents need a provider key (Providers page). Without one, all seven decision architectures except "LLM team agent" work offline.
+* **Claude Code** and **Codex** use the CLIs installed and signed in on your machine (`claude`, `codex`). The picker shows what each CLI offers.
+* **OpenRouter** needs a key: paste it under Settings. It is stored only in your browser and sent with the match request.
+* There is no offline or built-in coach: both sides need a working model. If a model fails to answer, its team simply keeps its current tactics and the Thoughts feed says why.
+
+Production: `npm run build`, then serve `apps/web/dist` behind a reverse proxy that forwards `/api` and `/ws` and preserves `Host` (or sets `X-Forwarded-Host`).
+
+## How it works
+The model is a **coach**, not a puppeteer: it only chooses tactics (formation, pressing, width, style, player instructions) every few virtual minutes and on events. A deterministic engine turns those tactics into movement, passing, tackling and shooting on a fixed 1/60 s physics step (Rapier), so slow or failing models never stall the match. Details and measured behaviour: `docs/SIMULATION_ENGINE.md`.
+
+## Using it
+* Camera: broadcast, tactical, follow ball, goal. Pause, resume and end the match any time.
+* **D** key (or the `dbg` button) toggles the simulation debug overlay: ball owner, possession, speeds, actions, best pass options, collisions, step time.
+* Penalty results are revealed only after the kick has played out.
 
 ## Scripts
-`npm test` · `npm run typecheck` · `npm run lint` · `npm run build` — see `docs/TESTING_STRATEGY.md`.
+`npm run verify` (typecheck + lint + tests + build) · `npm test` · `npm run e2e` (real-browser end-to-end; needs `npx playwright install chromium` once) · `npx tsx scripts/audit.ts 4 3` (football behaviour audit over whole matches).
+
+## Layout
+`packages/shared` (types) · `packages/sim` (physics, match engine, agents, rules, shootout) · `apps/server` (Fastify + WebSocket, provider/CLI plumbing) · `apps/web` (Vite + React + react-three-fiber).
 
 ## Docs
-`docs/IMPLEMENTATION_STATUS.md` (what is done, tested, partial, pending) · `SYSTEM_ARCHITECTURE` · `SIMULATION_ENGINE` · `PHYSICS_SPECIFICATION` · `FUTSAL_RULES` · `AI_ARCHITECTURE` · `AI_PROVIDER_INTEGRATION` · `DATABASE_SCHEMA` · `API_SPECIFICATION` · `DESIGN_SYSTEM` · `SECURITY` · `TESTING_STRATEGY` · `PROJECT_REQUIREMENTS`.
+`docs/SIMULATION_ENGINE.md` (engine, passing, possession, measured numbers, limitations) · `AI_PROVIDER_INTEGRATION` · `FUTSAL_RULES` · `PHYSICS_SPECIFICATION` · `TESTING_STRATEGY` · `IMPLEMENTATION_STATUS`. Some older docs describe the earlier multi-page version (accounts, database); the notes at the top of each say so.

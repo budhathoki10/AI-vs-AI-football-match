@@ -24,6 +24,8 @@ export class PhysicsWorld {
   private players = new Map<string, Body>();
   private byCollider = new Map<number, string>();
   contacts: Contact[] = [];
+  /** collisions between two players in the last step: who, and the closing speed (m/s) */
+  bumps: { a: string; b: string; v: number }[] = [];
   /** colliders (posts/crossbar) the ball hit this step — for rules/tests */
   woodwork = false;
   private woodHandles = new Set<number>();
@@ -142,10 +144,12 @@ export class PhysicsWorld {
         this.ball.body.applyImpulse({ x: (-bs.vx / sp) * d * PHYS.ballMass, y: 0, z: (-bs.vz / sp) * d * PHYS.ballMass }, true);
       }
     }
-    this.contacts = []; this.woodwork = false;
+    this.contacts = []; this.woodwork = false; this.bumps = [];
     this.world.step(this.queue);
     this.queue.drainCollisionEvents((h1, h2, started) => {
       if (!started) return;
+      const ia = this.byCollider.get(h1), ib = this.byCollider.get(h2);
+      if (ia && ib) { const va = this.players.get(ia)!.body.linvel(), vb = this.players.get(ib)!.body.linvel(); this.bumps.push({ a: ia, b: ib, v: Math.hypot(va.x - vb.x, va.z - vb.z) }); return; }
       const other = h1 === this.ball.collider.handle ? h2 : h2 === this.ball.collider.handle ? h1 : -1;
       if (other < 0) return;
       const pid = this.byCollider.get(other);

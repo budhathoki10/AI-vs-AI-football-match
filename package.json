@@ -3,22 +3,36 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
-    "test": "npm run test -w @futsal/sim && npm run test -w @futsal/server",
-    "typecheck": "npm run typecheck -w @futsal/sim && npm run typecheck -w @futsal/server && npm run typecheck -w @futsal/web",
-    "lint": "eslint .",
-    "build": "npm run build -w @futsal/web",
+    "dev": "concurrently -k -n server,web -c yellow,cyan \"npm run dev:server\" \"npm run dev:web\"",
     "dev:server": "npm run dev -w @futsal/server",
-    "dev:web": "npm run dev -w @futsal/web"
+    "dev:web": "npm run dev -w @futsal/web",
+    "build": "npm run build -w @futsal/web",
+    "test": "npm run test -w @futsal/sim && npm run test -w @futsal/server && npm run test -w @futsal/web",
+    "typecheck": "npm run typecheck -w @futsal/shared && npm run typecheck -w @futsal/sim && npm run typecheck -w @futsal/server && npm run typecheck -w @futsal/web",
+    "lint": "eslint .",
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build",
+    "e2e": "tsx e2e/run.mjs",
+    "measure": "tsx scripts/measure.ts",
+    "fit-xg": "tsx scripts/fit-xg.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "concurrently": "^10.0.7",
     "eslint": "^9.0.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "playwright": "^1.65.1",
+    "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.0.0",
-    "vitest": "^2.1.0",
-    "tsx": "^4.19.0"
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
   },
-  "engines": { "node": ">=22.5" }
+  "engines": {
+    "node": ">=22.5"
+  }
 }
