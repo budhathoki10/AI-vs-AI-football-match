@@ -9,6 +9,8 @@ Reference: FIFA Futsal Laws of the Game. **This is a custom 90-minute virtual ma
 - **Goal clearance** when the attackers last touch the ball over the goal line (GK distributes; modelled as a pass/kick; indirect)
 - **Corner kicks** when the defenders last touch it over their goal line
 - Direct free kicks from fouls (physics-detected: closing speed on the ball carrier from a defender who did not play the ball first)
+- **Advantage:** play continues when the fouled carrier keeps the ball moving forward outside his own third (not for penalty-area fouls or red-card fouls); the free kick is awarded at the foul spot if the opponent wins the ball within 3 s or the ball goes out (`advantage`, `advantage_over` events)
+- **Wall:** two defenders, 5.2 m from the ball on the line to goal, walk into position before a direct free kick in shooting range (none for accumulated-foul kicks)
 - **Penalty kick** (regulation) for fouls inside the penalty area; **separate** from the post-match shootout
 - Accumulated fouls per half: from the 6th foul the free kick is direct with no wall; if committed between the penalty-area edge and the second penalty mark it is taken from the **second penalty mark**
 - Yellow/red cards (second yellow = red); dismissed player removed; team plays one short for 2 virtual minutes (or until it concedes) and then a replacement enters
@@ -19,12 +21,12 @@ Reference: FIFA Futsal Laws of the Game. **This is a custom 90-minute virtual ma
 - Ball out of play, restart timeouts (taker forced after a timeout)
 
 ## Not implemented / simplified (honest list)
-- Advantage is **not** implemented (play stops at every foul)
-- No defensive wall modelling; only distance clearance
+- Advantage is a simplified rule (single 3 s window, no separate tactical-advantage judgement); a card for a foul played on is shown immediately
+- The wall is two players placed on the shot line; no jumping, no wall-shuffling
 - Four-second restart rule is a timeout, not a yellow-card sanction
 - Goalkeeper throws are kicks/passes; GK "catching" is a controlled trap, no hand animation
 - Second penalty mark rule uses an approximation of the Law's wording
-- No time-outs, no referee decision latency, no injuries
+- No time-outs (not required by this format), no referee decision latency, no injuries
 - Fouls are generated only from physical contact (no handball, no obstruction)
 
 ## Shootout (spec §5) — see AI_ARCHITECTURE.md and SIMULATION_ENGINE.md

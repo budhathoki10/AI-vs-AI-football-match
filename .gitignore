@@ -7,4 +7,7 @@ dist
 *.sqlite-*
 data/
 coverage
+e2e/out
 .DS_Store
+!.env.example
+.vitest

@@ -3,9 +3,33 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "vite", "build": "tsc --noEmit && vite build", "typecheck": "tsc --noEmit", "preview": "vite preview" },
-  "dependencies": {
-    "@react-three/drei": "^9.114.0", "@react-three/fiber": "^8.17.0", "framer-motion": "^11.11.0", "react": "^18.3.1", "react-dom": "^18.3.1", "react-router-dom": "^6.27.0", "three": "^0.169.0"
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "preview": "vite preview"
   },
-  "devDependencies": { "@types/react": "^18.3.0", "@types/react-dom": "^18.3.0", "@types/three": "^0.169.0", "@vitejs/plugin-react": "^4.3.0", "vite": "^5.4.0", "@types/node": "^22.0.0" }
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource/instrument-serif": "^5.3.0",
+    "@futsal/shared": "^0.1.0",
+    "@react-three/drei": "^9.114.0",
+    "@react-three/fiber": "^8.17.0",
+    "motion": "^14.14.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/three": "^0.169.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "tailwindcss": "^4.3.5",
+    "vite": "^8.3.8"
+  }
 }

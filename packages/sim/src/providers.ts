@@ -14,8 +14,9 @@ export interface ModelInfo {
   /** USD per 1M tokens. null = unknown. Never invented: only filled from provider discovery (OpenRouter) or user-entered overrides. */
   inputPricePerM: number | null; outputPricePerM: number | null;
 }
-export interface ProviderCall { kind: ProviderKind; apiKey: string; model: string; baseUrl?: string; system: string; user: string; maxTokens?: number; timeoutMs?: number; retries?: number; temperature?: number }
-export interface ProviderResult { text: string; tokensIn: number; tokensOut: number; latencyMs: number; retries: number }
+export interface ProviderCall { kind: ProviderKind; apiKey: string; model: string; baseUrl?: string; system: string; user: string; maxTokens?: number; timeoutMs?: number; retries?: number; temperature?: number; /** mark the static system prefix cacheable where the provider needs an explicit marker (Anthropic). Default true. */ cacheSystem?: boolean }
+/** tokensIn is the TOTAL prompt size for every provider; cachedTokens = part of it served from the provider's prompt cache; cacheWriteTokens = part written to the cache (Anthropic only). */
+export interface ProviderResult { text: string; tokensIn: number; tokensOut: number; cachedTokens: number; cacheWriteTokens: number; latencyMs: number; retries: number }
 
 export class ProviderError extends Error { constructor(msg: string, readonly status?: number, readonly retryable = false) { super(msg); } }
 
@@ -27,7 +28,7 @@ export function buildRequest(c: ProviderCall): { url: string; headers: Record<st
   switch (c.kind) {
     case 'anthropic':
       return { url: `${base(c)}/messages`, headers: { 'x-api-key': c.apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: { model: c.model, max_tokens: maxTokens, temperature: c.temperature ?? 0.3, system: c.system, messages: [{ role: 'user', content: c.user }] } };
+        body: { model: c.model, max_tokens: maxTokens, temperature: c.temperature ?? 0.3, system: c.cacheSystem === false ? c.system : [{ type: 'text', text: c.system, cache_control: { type: 'ephemeral' } }], messages: [{ role: 'user', content: c.user }] } };
     case 'gemini':
       return { url: `${base(c)}/models/${encodeURIComponent(c.model)}:generateContent`, headers: { 'x-goog-api-key': c.apiKey, 'content-type': 'application/json' },
         body: { systemInstruction: { parts: [{ text: c.system }] }, contents: [{ role: 'user', parts: [{ text: c.user }] }], generationConfig: { maxOutputTokens: maxTokens, temperature: c.temperature ?? 0.3, responseMimeType: 'application/json' } } };
@@ -37,16 +38,18 @@ export function buildRequest(c: ProviderCall): { url: string; headers: Record<st
   }
 }
 
-export function parseResponse(kind: ProviderKind, j: any): { text: string; tokensIn: number; tokensOut: number } {
-  if (kind === 'anthropic') {
+export function parseResponse(kind: ProviderKind, j: any): { text: string; tokensIn: number; tokensOut: number; cachedTokens: number; cacheWriteTokens: number } {
+  if (kind === 'anthropic') { // Anthropic's input_tokens excludes cache reads/writes: the total prompt is the sum
     const text = (j?.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
-    return { text, tokensIn: j?.usage?.input_tokens ?? 0, tokensOut: j?.usage?.output_tokens ?? 0 };
+    const u = j?.usage ?? {}; const read = u.cache_read_input_tokens ?? 0, write = u.cache_creation_input_tokens ?? 0;
+    return { text, tokensIn: (u.input_tokens ?? 0) + read + write, tokensOut: u.output_tokens ?? 0, cachedTokens: read, cacheWriteTokens: write };
   }
   if (kind === 'gemini') {
-    const text = (j?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p.text ?? '').join('');
-    return { text, tokensIn: j?.usageMetadata?.promptTokenCount ?? 0, tokensOut: j?.usageMetadata?.candidatesTokenCount ?? 0 };
+    const text = (j?.candidates?.[0]?.content?.parts ?? []).map((p: any) => p.text ?? '').join(''); const u = j?.usageMetadata ?? {};
+    return { text, tokensIn: u.promptTokenCount ?? 0, tokensOut: u.candidatesTokenCount ?? 0, cachedTokens: u.cachedContentTokenCount ?? 0, cacheWriteTokens: 0 };
   }
-  return { text: j?.choices?.[0]?.message?.content ?? '', tokensIn: j?.usage?.prompt_tokens ?? 0, tokensOut: j?.usage?.completion_tokens ?? 0 };
+  const u = j?.usage ?? {}; // OpenAI reports prompt_tokens_details.cached_tokens, DeepSeek prompt_cache_hit_tokens; both are included in prompt_tokens
+  return { text: j?.choices?.[0]?.message?.content ?? '', tokensIn: u.prompt_tokens ?? 0, tokensOut: u.completion_tokens ?? 0, cachedTokens: u.prompt_tokens_details?.cached_tokens ?? u.prompt_cache_hit_tokens ?? 0, cacheWriteTokens: 0 };
 }
 
 export function extractJson(text: string): unknown {
@@ -92,9 +95,11 @@ export async function discoverModels(kind: ProviderKind, apiKey: string, baseUrl
   return (j.data ?? []).map((m: any) => ({ id: m.id, provider: kind, contextWindow: null, structuredOutput: null, inputPricePerM: null, outputPricePerM: null }));
 }
 
-export function estimateCost(tokensIn: number, tokensOut: number, price?: { inputPricePerM: number | null; outputPricePerM: number | null } | null): number | null {
+export interface Price { inputPricePerM: number | null; outputPricePerM: number | null; /** user-entered price of cached prompt tokens; when absent cached tokens are billed at the full input price (an upper bound, never a guess of a discount) */ cachedInputPricePerM?: number | null }
+export function estimateCost(tokensIn: number, tokensOut: number, price?: Price | null, cachedTokens = 0): number | null {
   if (!price || price.inputPricePerM == null || price.outputPricePerM == null) return null; // unknown pricing is reported as unknown, never guessed
-  return (tokensIn * price.inputPricePerM + tokensOut * price.outputPricePerM) / 1e6;
+  const cached = Math.min(cachedTokens, tokensIn); const cachedPrice = price.cachedInputPricePerM ?? price.inputPricePerM;
+  return ((tokensIn - cached) * price.inputPricePerM + cached * cachedPrice + tokensOut * price.outputPricePerM) / 1e6;
 }
 
 const SYSTEM = `You are the head coach of a 5-a-side futsal team in a simulation. You control the whole team collectively, not individual physics.
@@ -102,7 +107,9 @@ Reply with ONE JSON object only (no prose, no markdown). Never include hidden re
 Schema: {"formation": one of ${JSON.stringify(FORMATIONS)}, "teamStrategy": "balanced"|"attacking"|"defensive"|"counter"|"park_the_bus"|"all_out_attack", "attackingStyle": "possession"|"direct"|"counter"|"wing_play"|"pivot_play", "defensiveStyle": "high_press"|"mid_block"|"low_block"|"man_marking", "pressingIntensity": 0..1, "riskLevel": 0..1, "flyingGoalkeeper": boolean, "playerInstructions": [{"playerId": id from onCourt, "instruction": one of ${JSON.stringify(INSTRUCTIONS)}}], "substitutions": [{"out": onCourt id, "in": bench id}] (optional, max 3), "reasonSummary": string}.
 Only use player ids given in the state. The simulation rules engine validates everything; illegal output is discarded.`;
 
-export interface LlmAgentOptions { kind: ProviderKind; apiKey: string; model: string; baseUrl?: string; price?: { inputPricePerM: number | null; outputPricePerM: number | null } | null; fetchImpl?: FetchLike; timeoutMs?: number; retries?: number; maxTokens?: number; cooldownVirtual?: number; intervalVirtual?: number }
+/** Anything that can turn (system, user) into text: an HTTP provider, or a local CLI such as `claude -p` / `codex exec`. */
+export type Transport = (system: string, user: string) => Promise<{ text: string; tokensIn?: number; tokensOut?: number }>;
+export interface LlmAgentOptions { /** when set, replaces the HTTP call; `kind`/`apiKey` are then only labels */ transport?: Transport; label?: string; kind: ProviderKind; apiKey: string; model: string; baseUrl?: string; price?: Price | null; fetchImpl?: FetchLike; timeoutMs?: number; retries?: number; maxTokens?: number; cooldownVirtual?: number; intervalVirtual?: number }
 
 /** Team-level LLM agent: one async call per decision for the whole team. Failures never throw into the simulation: they return tactics=null and the engine's documented fallback applies. */
 export class LlmAgent implements TeamAgent {
@@ -112,21 +119,31 @@ export class LlmAgent implements TeamAgent {
   constructor(private o: LlmAgentOptions) { this.cooldownVirtual = o.cooldownVirtual ?? 120; this.intervalVirtual = o.intervalVirtual ?? 300; }
 
   private async ask(system: string, user: string): Promise<{ r: ProviderResult; costUsd: number | null }> {
+    if (this.o.transport) {
+      const t0 = Date.now(); const out = await this.o.transport(system, user);
+      return { r: { text: out.text, tokensIn: out.tokensIn ?? 0, tokensOut: out.tokensOut ?? 0, cachedTokens: 0, cacheWriteTokens: 0, latencyMs: Date.now() - t0, retries: 0 }, costUsd: null };
+    }
     const r = await callProvider({ kind: this.o.kind, apiKey: this.o.apiKey, model: this.o.model, baseUrl: this.o.baseUrl, system, user, maxTokens: this.o.maxTokens ?? 500, timeoutMs: this.o.timeoutMs ?? 15000, retries: this.o.retries ?? 1 }, this.o.fetchImpl);
-    return { r, costUsd: estimateCost(r.tokensIn, r.tokensOut, this.o.price) };
+    return { r, costUsd: estimateCost(r.tokensIn, r.tokensOut, this.o.price, r.cachedTokens) };
+  }
+
+  /** Static, deterministic per-match context (identical on every call, so it forms a cacheable prompt prefix). */
+  private systemFor(team: TeamConfig): string {
+    const roster = team.players.map((p) => `${p.id} ${p.role} #${p.number} ${p.name}: ${Object.entries(p.attributes).map(([k, v]) => `${k.slice(0, 4)}${v}`).join(' ')}`).join('\n');
+    return `${SYSTEM}\n\nYour squad (static for this match; attributes 0-100; first player is the goalkeeper, the last three are substitutes):\n${roster}\nOperator tactical notes: ${(team.tacticalInstructions ?? 'none').slice(0, 300)}`;
   }
 
   decide(state: CompactState, team: TeamConfig): Promise<AgentDecision> {
     const slim = { ...state, current: { ...state.current, playerInstructions: state.current.playerInstructions.slice(0, 5) } };
-    const user = `Team: ${team.name}. Operator tactical notes: ${(team.tacticalInstructions ?? 'none').slice(0, 300)}\nMatch state (JSON): ${JSON.stringify(slim)}\nTrigger: ${state.trigger}. Return the new tactics JSON.`;
+    const user = `Team: ${team.name}.\nMatch state (JSON): ${JSON.stringify(slim)}\nTrigger: ${state.trigger}. Return the new tactics JSON.`;
     const key = JSON.stringify([state.team, state.minute, state.scoreOwn, state.scoreOpp, state.possession, state.trigger]);
-    const cached = this.cache.get(key); if (cached) return Promise.resolve({ tactics: cached.tactics, meta: { ...cached.meta, source: 'llm(cache)', tokensIn: 0, tokensOut: 0, costUsd: 0 } });
+    const cached = this.cache.get(key); if (cached) return Promise.resolve({ tactics: cached.tactics, meta: { ...cached.meta, source: 'llm(cache)', tokensIn: 0, tokensOut: 0, tokensCached: 0, costUsd: 0 } });
     const dup = this.inflight.get(key); if (dup) return dup; // duplicate-request prevention
     const p = (async (): Promise<AgentDecision> => {
-      try { const { r, costUsd } = await this.ask(SYSTEM, user); const tactics = extractJson(r.text);
-        const d: AgentDecision = { tactics, meta: { source: `llm:${this.o.kind}:${this.o.model}`, latencyMs: r.latencyMs, tokensIn: r.tokensIn, tokensOut: r.tokensOut, costUsd, retries: r.retries } };
+      try { const { r, costUsd } = await this.ask(this.systemFor(team), user); const tactics = extractJson(r.text);
+        const d: AgentDecision = { tactics, meta: { source: `llm:${this.o.label ?? this.o.kind}:${this.o.model}`, latencyMs: r.latencyMs, tokensIn: r.tokensIn, tokensOut: r.tokensOut, tokensCached: r.cachedTokens, costUsd, retries: r.retries } };
         this.cache.set(key, d); return d;
-      } catch (e) { return { tactics: null, meta: { source: `llm:${this.o.kind}:${this.o.model}`, error: e instanceof Error ? e.message : 'unknown error' } }; }
+      } catch (e) { return { tactics: null, meta: { source: `llm:${this.o.label ?? this.o.kind}:${this.o.model}`, error: e instanceof Error ? e.message : 'unknown error' } }; }
       finally { this.inflight.delete(key); }
     })();
     this.inflight.set(key, p); return p;

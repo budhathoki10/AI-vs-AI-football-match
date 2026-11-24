@@ -2,8 +2,8 @@ export type Role = 'GK' | 'FIXO' | 'ALA' | 'PIVOT' | 'UNIVERSAL';
 export type TeamId = 'A' | 'B';
 export type Formation = '2-2' | '1-2-1' | '3-1' | '4-0';
 export const FORMATIONS: Formation[] = ['2-2', '1-2-1', '3-1', '4-0'];
-export type Architecture = 'llm' | 'rule' | 'fsm' | 'behavior_tree' | 'utility' | 'goap' | 'hybrid';
-export const ARCHITECTURES: Architecture[] = ['llm', 'rule', 'fsm', 'behavior_tree', 'utility', 'goap', 'hybrid'];
+export type Architecture = 'llm' | 'none';
+export const ARCHITECTURES: Architecture[] = ['llm', 'none'];
 
 export interface Attributes {
   acceleration: number; maxSpeed: number; agility: number; stamina: number;
@@ -55,7 +55,7 @@ export type EventType =
   | 'kickoff' | 'goal' | 'shot' | 'save' | 'foul' | 'accumulated_foul' | 'yellow_card' | 'red_card'
   | 'corner' | 'kick_in' | 'goal_clearance' | 'free_kick' | 'penalty_kick' | 'substitution'
   | 'tactical_change' | 'formation_change' | 'halftime' | 'fulltime' | 'four_second_violation'
-  | 'pass' | 'tackle' | 'interception' | 'flying_gk' | 'shootout_start';
+  | 'pass' | 'tackle' | 'interception' | 'flying_gk' | 'shootout_start' | 'advantage' | 'advantage_over';
 
 export interface MatchEvent {
   id: number; type: EventType; vt: number; // virtual seconds
@@ -69,5 +69,5 @@ export interface PlayerSnap { id: string; x: number; z: number; vx: number; vz: 
 export interface Snapshot {
   vt: number; rt: number; phase: Phase; play: string;
   ball: { x: number; y: number; z: number; vx: number; vy: number; vz: number };
-  players: PlayerSnap[]; score: [number, number]; possession: TeamId | null;
+  players: PlayerSnap[]; score: [number, number]; possession: TeamId | null; /** the player in control of the ball at this moment (null = loose / in flight) */ own?: string | null;
 }

@@ -15,9 +15,30 @@ describe('provider abstraction', () => {
     expect(buildRequest({ ...base, kind: 'gemini' }).url).toContain(':generateContent');
   });
   it('parses text and token usage for each wire format', () => {
-    expect(parseResponse('openai', { choices: [{ message: { content: '{}' } }], usage: { prompt_tokens: 5, completion_tokens: 2 } })).toEqual({ text: '{}', tokensIn: 5, tokensOut: 2 });
-    expect(parseResponse('anthropic', { content: [{ type: 'text', text: 'x' }], usage: { input_tokens: 7, output_tokens: 3 } })).toEqual({ text: 'x', tokensIn: 7, tokensOut: 3 });
-    expect(parseResponse('gemini', { candidates: [{ content: { parts: [{ text: 'g' }] } }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 1 } })).toEqual({ text: 'g', tokensIn: 4, tokensOut: 1 });
+    expect(parseResponse('openai', { choices: [{ message: { content: '{}' } }], usage: { prompt_tokens: 5, completion_tokens: 2 } })).toEqual({ text: '{}', tokensIn: 5, tokensOut: 2, cachedTokens: 0, cacheWriteTokens: 0 });
+    expect(parseResponse('anthropic', { content: [{ type: 'text', text: 'x' }], usage: { input_tokens: 7, output_tokens: 3 } })).toEqual({ text: 'x', tokensIn: 7, tokensOut: 3, cachedTokens: 0, cacheWriteTokens: 0 });
+    expect(parseResponse('gemini', { candidates: [{ content: { parts: [{ text: 'g' }] } }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 1 } })).toEqual({ text: 'g', tokensIn: 4, tokensOut: 1, cachedTokens: 0, cacheWriteTokens: 0 });
+  });
+  it('prompt caching: Anthropic gets an explicit cache breakpoint on the static system prefix; cache usage is parsed for every provider', () => {
+    const a = buildRequest({ ...base, kind: 'anthropic' }).body as any; expect(a.system[0]).toMatchObject({ type: 'text', text: 's', cache_control: { type: 'ephemeral' } });
+    expect((buildRequest({ ...base, kind: 'anthropic', cacheSystem: false }).body as any).system).toBe('s');
+    // Anthropic input_tokens excludes cache reads/writes: total prompt = input + read + write
+    expect(parseResponse('anthropic', { content: [{ type: 'text', text: 'x' }], usage: { input_tokens: 50, cache_read_input_tokens: 900, cache_creation_input_tokens: 100, output_tokens: 3 } })).toMatchObject({ tokensIn: 1050, cachedTokens: 900, cacheWriteTokens: 100 });
+    expect(parseResponse('openai', { choices: [{ message: { content: '{}' } }], usage: { prompt_tokens: 1200, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 1024 } } })).toMatchObject({ tokensIn: 1200, cachedTokens: 1024 });
+    expect(parseResponse('deepseek', { choices: [{ message: { content: '{}' } }], usage: { prompt_tokens: 300, completion_tokens: 2, prompt_cache_hit_tokens: 256 } })).toMatchObject({ cachedTokens: 256 });
+    expect(parseResponse('gemini', { candidates: [{ content: { parts: [{ text: 'g' }] } }], usageMetadata: { promptTokenCount: 2000, candidatesTokenCount: 1, cachedContentTokenCount: 1500 } })).toMatchObject({ cachedTokens: 1500 });
+  });
+  it('cached tokens are billed at the full input price unless the user entered a cached price (no invented discounts)', () => {
+    expect(estimateCost(1_000_000, 0, { inputPricePerM: 2, outputPricePerM: 8 }, 600_000)).toBe(2);
+    expect(estimateCost(1_000_000, 0, { inputPricePerM: 2, outputPricePerM: 8, cachedInputPricePerM: 0.5 }, 600_000)).toBeCloseTo(0.8 + 0.3, 9);
+    expect(estimateCost(1000, 1000, { inputPricePerM: null, outputPricePerM: 8 }, 500)).toBeNull();
+  });
+  it('the LLM prompt keeps a static, deterministic prefix (rules + roster) and puts only the changing match state last', async () => {
+    const team = makeTeam('A', 'T', { seed: 1 }); const seen: string[] = []; const tactics = { ...defaultTactics(team), reasonSummary: 'x' };
+    const f: FetchLike = async (_u, init) => { const b = JSON.parse(init.body!); seen.push(b.messages[0].content); return resp({ choices: [{ message: { content: JSON.stringify(tactics) } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }) as any; };
+    const ag = new LlmAgent({ kind: 'openai', apiKey: 'k', model: 'm', fetchImpl: f });
+    const mk = (minute: number) => ({ team: 'A', trigger: 'interval', minute, scoreOwn: 0, scoreOpp: 0, possession: 'own', current: tactics, onCourt: [], bench: [], opponent: [] } as unknown as CompactState);
+    await ag.decide(mk(10), team); await ag.decide(mk(20), team); expect(seen[0]).toBe(seen[1]); expect(seen[0]).toContain(team.players[0].id); expect(seen[0]).toContain('goalkeeper');
   });
   it('extracts JSON from prose / fenced responses and rejects garbage', () => {
     expect(extractJson('```json\n{"a":1}\n```')).toEqual({ a: 1 }); expect(extractJson('Sure! {"a":2} bye')).toEqual({ a: 2 }); expect(() => extractJson('no json')).toThrow();

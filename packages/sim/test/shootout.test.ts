@@ -103,3 +103,20 @@ describe('automatic shootout after a drawn regulation', () => {
     expect(found).toBe(true);
   }, 300000);
 });
+
+describe('penalty outcome realism (physics, not a coin flip)', () => {
+  it('over many attempts with the documented fallback policy: mostly goals, a real share of saves, and genuine misses/woodwork', async () => {
+    const { initPhysics, simulateAttempt, fallbackPenaltyDecision, Rng } = await import('../src');
+    await initPhysics(); const rng = new Rng(2024); const c: Record<string, number> = {}; const N = 160;
+    for (let i = 0; i < N; i++) {
+      const sh = 60 + (i % 25);
+      const sd = fallbackPenaltyDecision({ role: 'shoot', round: 1, suddenDeath: false, ownScore: 0, oppScore: 0, history: [], eligible: [{ id: 'T', shooting: sh, role: 'ALA' }], keepers: [{ id: 'K', goalkeeping: 70 }] }, rng.next());
+      const kd = fallbackPenaltyDecision({ role: 'defend', round: 1, suddenDeath: false, ownScore: 0, oppScore: 0, history: [], eligible: [], keepers: [{ id: 'K', goalkeeping: 70 }] }, rng.next());
+      const r = simulateAttempt({ shooting: sh, ballControl: 60 }, { goalkeeping: 70, agility: 65 }, { side: sd.side!, height: sd.height!, power: sd.power! }, { dive: kd.dive ?? 0, reactDelay: kd.reactDelay ?? 0.05 }, rng);
+      c[r.result] = (c[r.result] ?? 0) + 1;
+    }
+    const goals = (c.goal ?? 0) / N, saves = (c.saved ?? 0) / N, off = ((c.missed ?? 0) + (c.post ?? 0)) / N;
+    expect(goals).toBeGreaterThan(0.4); expect(goals).toBeLessThan(0.85); expect(saves).toBeGreaterThan(0.1); expect(off).toBeGreaterThan(0.005);
+    expect(Object.values(c).reduce((a, b) => a + b, 0)).toBe(N);
+  }, 120000);
+});

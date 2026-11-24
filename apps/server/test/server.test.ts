@@ -1,166 +1,174 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { randomBytes } from 'node:crypto';
-import { buildApp } from '../src/app';
-import { openDb } from '../src/db';
-import { decryptSecret, encryptSecret, hashPassword, loadCredentialKey, verifyPassword } from '../src/crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
+import { WebSocket } from 'ws';
+import { CLAUDE_MODELS, type ServerMsg, type StartMatchBody } from '@futsal/shared';
+import { buildApp, isTrustedRequest } from '../src/app';
+import { MatchSession } from '../src/session';
+import { resolveCommand } from '../src/runCli';
 
-const key = randomBytes(32);
-let app: FastifyInstance; let db: ReturnType<typeof openDb>;
-const fakeFetch = async (url: string, init: any) => {
-  if (init.method === 'GET') return { ok: true, status: 200, json: async () => ({ data: [{ id: 'gpt-x' }] }), text: async () => '' };
-  const body = JSON.parse(init.body); void body;
-  return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '{"bogus":true}' } }], usage: { prompt_tokens: 120, completion_tokens: 30 } }), text: async () => '' };
-};
-beforeAll(async () => { db = openDb(':memory:'); ({ app } = await buildApp({ db, key, fetchImpl: fakeFetch })); });
-afterAll(async () => { await app.close(); });
+// ---------------------------------------------------------------------------------------------- stand-in CLIs
+const dir = mkdtempSync(join(tmpdir(), 'futsal-test-'));
+const fakeClaude = join(dir, 'claude.cjs'); const fakeCodex = join(dir, 'codex.cjs'); const codexHome = join(dir, 'codex-home');
+const TACTICS = `const tactics = (st, why) => ({ formation: '2-2', teamStrategy: 'attacking', attackingStyle: 'direct', defensiveStyle: 'mid_block', pressingIntensity: 0.7, riskLevel: 0.6, flyingGoalkeeper: false, playerInstructions: st.onCourt.filter((p) => p.role !== 'GK').map((p) => ({ playerId: p.id, instruction: 'support_build_up' })), reasonSummary: why });
+const state = (prompt) => JSON.parse(/Match state \\(JSON\\): (.*)\\nTrigger/.exec(prompt)[1]);`;
+writeFileSync(fakeClaude, `${TACTICS}
+const a = process.argv.slice(2);
+if (a[0] === 'auth') { console.log(JSON.stringify({ loggedIn: process.env.FAKE_LOGGED_IN !== '0', authMethod: 'test' })); process.exit(0); }
+const prompt = a[a.indexOf('-p') + 1];
+if (process.env.FAKE_RECORD_ARGS) require('fs').writeFileSync(process.env.FAKE_RECORD_ARGS, JSON.stringify(a));
+console.log(JSON.stringify({ is_error: false, result: JSON.stringify(tactics(state(prompt), 'fake claude: push forward')) }));`);
+writeFileSync(fakeCodex, `${TACTICS}
+const a = process.argv.slice(2);
+if (a[0] === 'login') { console.log('Logged in using ChatGPT'); process.exit(0); }
+const mi = a.indexOf('-m'); if (mi >= 0 && a[mi + 1] === 'gpt-bad') { console.error('ERROR: {"type":"error","error":{"message":"The gpt-bad model is not supported when using Codex with a ChatGPT account.","code":"model_not_found"}}'); process.exit(1); }
+const out = a[a.indexOf('-o') + 1]; const prompt = a[a.length - 1];
+if (prompt.startsWith('Reply with the single word')) { require('fs').writeFileSync(out, 'ok'); process.exit(0); }
+require('fs').writeFileSync(out, JSON.stringify(tactics(state(prompt), 'fake codex: stay compact')));`);
+mkdirSync(codexHome, { recursive: true });
+writeFileSync(join(codexHome, 'models_cache.json'), JSON.stringify({ models: [{ slug: 'gpt-test', display_name: 'GPT Test', visibility: 'list' }, { slug: 'gpt-bad', display_name: 'GPT Bad', visibility: 'list' }, { slug: 'hidden', display_name: 'Hidden', visibility: 'hide' }] }));
+writeFileSync(join(codexHome, 'config.toml'), 'model = "gpt-test"\n');
 
-let ipN = 0;
-const reg = async (name: string) => { const r = await app.inject({ method: 'POST', url: '/api/auth/register', remoteAddress: `10.1.0.${++ipN}`, payload: { username: name, password: 'password123' } }); expect(r.statusCode).toBe(201); return r.json().token as string; };
-const H = (t: string) => ({ authorization: `Bearer ${t}` });
-const team = (name: string, extra: Record<string, unknown> = {}) => ({ name, formation: '2-2', architecture: 'hybrid', ...extra });
-const waitMatch = async (t: string, id: number) => { for (let i = 0; i < 600; i++) { const r = await app.inject({ method: 'GET', url: `/api/matches/${id}`, headers: H(t) }); if (r.json().status !== 'running') return r.json(); await new Promise((r2) => setTimeout(r2, 100)); } throw new Error('timeout'); };
+process.env.CLAUDE_BIN = fakeClaude; process.env.CODEX_BIN = fakeCodex; process.env.CODEX_HOME = codexHome; delete process.env.OPENROUTER_API_KEY;
 
-describe('crypto', () => {
-  it('AES-GCM round trip, tamper detection, scrypt passwords', () => {
-    const k = randomBytes(32); const c = encryptSecret('sk-live-123456789', k); expect(c).not.toContain('sk-live'); expect(decryptSecret(c, k)).toBe('sk-live-123456789');
-    expect(() => decryptSecret(c.slice(0, -2) + 'AA', k)).toThrow(); expect(() => decryptSecret(c, randomBytes(32))).toThrow();
-    const h = hashPassword('hunter2hunter2'); expect(verifyPassword('hunter2hunter2', h)).toBe(true); expect(verifyPassword('wrong', h)).toBe(false);
-  });
-  it('production requires an explicit credential key', () => { expect(() => loadCredentialKey({ NODE_ENV: 'production' } as any)).toThrow(); expect(() => loadCredentialKey({ CREDENTIAL_KEY: 'zz' } as any)).toThrow(); expect(loadCredentialKey({ CREDENTIAL_KEY: 'ab'.repeat(32) } as any).length).toBe(32); });
+// ---------------------------------------------------------------------------------------------- helpers
+let app: FastifyInstance; let base = ''; let wsBase = '';
+const pc = (provider: 'claude' | 'codex' | 'openrouter', model: string, effort: 'default' | 'low' | 'medium' | 'high' = 'default') => ({ provider, model, effort });
+const body = (home: ReturnType<typeof pc>, away: ReturnType<typeof pc>, extra: Partial<StartMatchBody> = {}): StartMatchBody => ({ home, away, minutes: 1, seed: 21, names: { A: 'Home FC', B: 'Away FC' }, ...extra } as StartMatchBody);
+const post = (path: string, b?: unknown, headers: Record<string, string> = {}) => fetch(`${base}${path}`, { method: 'POST', headers: b === undefined ? headers : { 'content-type': 'application/json', ...headers }, body: b === undefined ? undefined : JSON.stringify(b) });
+const start = async (b: StartMatchBody) => { const r = await post('/api/match', b); return { status: r.status, json: (await r.json()) as { id?: string; error?: string; issues?: unknown[] } }; };
+/** Connects to the live stream and resolves with every message once the stream reports `done`/`error`, or after `maxMs`. */
+const collect = (id: string, o: { until?: (m: ServerMsg, all: ServerMsg[]) => boolean; maxMs?: number } = {}) => new Promise<ServerMsg[]>((resolve) => {
+  const all: ServerMsg[] = []; const ws = new WebSocket(`${wsBase}/ws/match/${id}`); const timer = setTimeout(() => { ws.close(); resolve(all); }, o.maxMs ?? 120000);
+  ws.on('message', (d) => { const m = JSON.parse(String(d)) as ServerMsg; all.push(m); if (o.until ? o.until(m, all) : m.t === 'done' || m.t === 'error') { clearTimeout(timer); ws.close(); resolve(all); } });
 });
 
-describe('auth & validation', () => {
-  it('requires authentication, registers, logs in, rejects bad credentials, validates input', async () => {
-    expect((await app.inject({ method: 'GET', url: '/api/matches' })).statusCode).toBe(401);
-    const t = await reg('alice'); expect((await app.inject({ method: 'GET', url: '/api/me', headers: H(t) })).json().username).toBe('alice');
-    expect((await app.inject({ method: 'POST', url: '/api/auth/register', payload: { username: 'alice', password: 'password123' } })).statusCode).toBe(409);
-    expect((await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'alice', password: 'nopenope1' } })).statusCode).toBe(401);
-    expect((await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'alice', password: 'password123' } })).statusCode).toBe(200);
-    expect((await app.inject({ method: 'POST', url: '/api/auth/register', payload: { username: 'x', password: 'short' } })).statusCode).toBe(400);
-    const bad = await app.inject({ method: 'POST', url: '/api/matches', headers: H(t), payload: { teamA: team('A'), teamB: team('B'), realDurationMinutes: 7 } }); expect(bad.statusCode).toBe(400);
-    const sid = (await app.inject({ method: 'POST', url: '/api/auth/login', payload: { username: 'alice', password: 'password123' } })).headers['set-cookie'] as string; expect(sid).toMatch(/HttpOnly/); expect(sid).toMatch(/SameSite=Lax/);
-    await app.inject({ method: 'POST', url: '/api/auth/logout', headers: H(t) }); expect((await app.inject({ method: 'GET', url: '/api/me', headers: H(t) })).statusCode).toBe(401);
-  });
-  it('rate limits repeated auth attempts', async () => {
-    let last = 0; for (let i = 0; i < 14; i++) last = (await app.inject({ method: 'POST', url: '/api/auth/login', remoteAddress: '9.9.9.9', payload: { username: 'nobody', password: 'password123' } })).statusCode;
-    expect(last).toBe(429);
-  });
-  it('sets hardening headers and never leaks stack traces', async () => {
-    const r = await app.inject({ method: 'GET', url: '/api/health' }); expect(r.headers['x-content-type-options']).toBe('nosniff'); expect(r.json().durations).toEqual([1, 2, 3, 4, 5, 6]);
-  });
-});
+beforeAll(async () => {
+  ({ app } = await buildApp({ paced: false, fetchImpl: (async () => new Response(JSON.stringify({ data: [{ id: 'openai/gpt-4o-mini', name: 'GPT-4o mini', pricing: { prompt: '0.00000015', completion: '0.0000006' } }, { id: 'free/model', name: 'Free', pricing: { prompt: '0', completion: '0' } }] }))) as typeof fetch,
+    providerFetch: async (_u, init) => { const b = JSON.parse(init.body!) as { messages: { content: string }[] }; const st = JSON.parse(/Match state \(JSON\): (.*)\nTrigger/.exec(b.messages[1].content)![1]) as { onCourt: { id: string; role: string }[] };
+      const t = { formation: '2-2', teamStrategy: 'balanced', attackingStyle: 'possession', defensiveStyle: 'mid_block', pressingIntensity: 0.5, riskLevel: 0.5, flyingGoalkeeper: false, playerInstructions: st.onCourt.filter((p) => p.role !== 'GK').map((p) => ({ playerId: p.id, instruction: 'hold_position' })), reasonSummary: 'fake openrouter reply' };
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify(t) } }], usage: { prompt_tokens: 100, completion_tokens: 20 } }), text: async () => '' } as never; } }));
+  await app.listen({ port: 0, host: '127.0.0.1' }); const port = (app.server.address() as { port: number }).port; base = `http://127.0.0.1:${port}`; wsBase = `ws://127.0.0.1:${port}`;
+}, 60000);
+afterAll(async () => { await app.close(); rmSync(dir, { recursive: true, force: true }); });
 
-describe('BYOK provider keys', () => {
-  it('stores keys encrypted, shows only masked values, isolates users, tests and discovers models, removes keys', async () => {
-    const a = await reg('bob'), b = await reg('carol'); const secret = 'sk-test-ABCDEFGHIJKLMNOP';
-    const put = await app.inject({ method: 'PUT', url: '/api/providers', headers: H(a), payload: { kind: 'openai', apiKey: secret } }); expect(put.statusCode).toBe(200); expect(put.body).not.toContain(secret);
-    const row = db.prepare('SELECT enc_key FROM provider_credentials').get() as any; expect(row.enc_key).not.toContain('ABCDEFGH'); expect(decryptSecret(row.enc_key, key)).toBe(secret);
-    const list = await app.inject({ method: 'GET', url: '/api/providers', headers: H(a) }); expect(list.body).not.toContain(secret); expect(list.json().configured[0].maskedKey).toMatch(/••••/);
-    expect((await app.inject({ method: 'GET', url: '/api/providers', headers: H(b) })).json().configured).toHaveLength(0);
-    expect((await app.inject({ method: 'POST', url: '/api/providers/openai/test', headers: H(b), payload: {} })).statusCode).toBe(404);
-    expect((await app.inject({ method: 'POST', url: '/api/providers/openai/test', headers: H(a), payload: {} })).json().ok).toBe(true);
-    const models = (await app.inject({ method: 'GET', url: '/api/providers/openai/models', headers: H(a) })).json().models; expect(models[0]).toMatchObject({ id: 'gpt-x', priceSource: 'unknown', inputPricePerM: null });
-    await app.inject({ method: 'PUT', url: '/api/models/pricing', headers: H(a), payload: { kind: 'openai', model: 'gpt-x', inputPerM: 1, outputPerM: 2 } });
-    expect((await app.inject({ method: 'GET', url: '/api/providers/openai/models', headers: H(a) })).json().models[0]).toMatchObject({ inputPricePerM: 1, priceSource: 'user-entered' });
-    await app.inject({ method: 'DELETE', url: '/api/providers/openai', headers: H(a) }); expect((await app.inject({ method: 'GET', url: '/api/providers', headers: H(a) })).json().configured).toHaveLength(0);
-    expect(JSON.stringify(db.prepare('SELECT detail FROM audit_log').all())).not.toContain(secret);
+// ---------------------------------------------------------------------------------------------- tests
+describe('request safety', () => {
+  it('only trusts this app\'s own pages and JSON bodies', () => {
+    const h = (o: Record<string, string>) => ({ headers: o });
+    expect(isTrustedRequest(h({ 'content-type': 'application/json', host: 'localhost:5173' }), true)).toBe(true);
+    expect(isTrustedRequest(h({ 'content-type': 'application/json', host: 'localhost:5173', origin: 'http://localhost:5173' }), true)).toBe(true);
+    expect(isTrustedRequest(h({ 'content-type': 'application/json', host: 'localhost:5173', origin: 'https://evil.example' }), true)).toBe(false);
+    expect(isTrustedRequest(h({ 'content-type': 'text/plain', host: 'localhost:5173' }), true)).toBe(false);
+    expect(isTrustedRequest(h({ host: 'a:1', 'x-forwarded-host': 'b:2', origin: 'http://b:2' }), false)).toBe(true); // reverse proxy / dev proxy
   });
-  it('LLM teams need a configured key; with a key, invalid model output falls back and cost/tokens are tracked per team', async () => {
-    const t = await reg('dave');
-    const noKey = await app.inject({ method: 'POST', url: '/api/matches', headers: H(t), payload: { teamA: team('Gpt', { architecture: 'llm', provider: 'openai', model: 'gpt-x' }), teamB: team('Rule', { architecture: 'rule' }), realDurationMinutes: 1, paced: false } });
-    expect(noKey.statusCode).toBe(400);
-    await app.inject({ method: 'PUT', url: '/api/providers', headers: H(t), payload: { kind: 'openai', apiKey: 'sk-test-12345678901' } });
-    await app.inject({ method: 'PUT', url: '/api/models/pricing', headers: H(t), payload: { kind: 'openai', model: 'gpt-x', inputPerM: 1, outputPerM: 2 } });
-    const r = await app.inject({ method: 'POST', url: '/api/matches', headers: H(t), payload: { teamA: team('Gpt', { architecture: 'llm', provider: 'openai', model: 'gpt-x' }), teamB: team('Rule', { architecture: 'rule' }), realDurationMinutes: 1, seed: 3, paced: false } });
-    expect(r.statusCode).toBe(202); const m = await waitMatch(t, r.json().id); expect(m.status).toBe('finished');
-    const dec = (await app.inject({ method: 'GET', url: `/api/matches/${m.id}/decisions`, headers: H(t) })).json().decisions as any[];
-    const gpt = dec.filter((d) => d.team === 'A'); expect(gpt.length).toBeGreaterThan(0); expect(gpt.every((d) => !d.accepted && d.source.includes('fallback') && d.tactics)).toBe(true);
-    const u = m.apiUsage.find((x: any) => x.team === 'A'); expect(u.tokens_in).toBeGreaterThan(0); expect(u.cost_usd).toBeGreaterThan(0); expect(m.apiUsage.find((x: any) => x.team === 'B')).toBeUndefined();
-    expect(JSON.stringify(m)).not.toContain('sk-test');
-  });
-});
-
-describe('end-to-end match flow (create -> live -> persisted results -> history -> replay)', () => {
-  let t: string; let finished: any;
-  beforeAll(async () => { t = await reg('erin'); });
-  it('runs a regulation match, persists everything, and a user cannot read another user match', async () => {
-    const c = await app.inject({ method: 'POST', url: '/api/matches', headers: H(t), payload: { teamA: team('Alpha', { architecture: 'utility' }), teamB: team('Beta', { architecture: 'fsm', formation: '1-2-1' }), realDurationMinutes: 2, seed: 21, paced: false } });
-    expect(c.statusCode).toBe(202); const id = c.json().id; finished = await waitMatch(t, id);
-    expect(finished.status).toBe('finished'); expect(finished.time.selectedRealDurationSeconds).toBe(120); expect(finished.time.virtualMatchDurationSeconds).toBe(5400); expect(finished.time.actualRealElapsedSeconds).toBeGreaterThan(30);
-    expect(finished.participants).toHaveLength(2); expect(finished.teamStats.A.passes).toBeGreaterThan(0); expect(Object.keys(finished.playerStats).length).toBe(16);
-    const other = await reg('frank'); expect((await app.inject({ method: 'GET', url: `/api/matches/${id}`, headers: H(other) })).statusCode).toBe(404);
-    expect((await app.inject({ method: 'GET', url: `/api/matches/${id}/replay`, headers: H(other) })).statusCode).toBe(404);
-  });
-  it('events and replay snapshots are served from stored simulation data', async () => {
-    const ev = (await app.inject({ method: 'GET', url: `/api/matches/${finished.id}/events`, headers: H(t) })).json().events; expect(ev[0].type).toBe('kickoff'); expect(ev.find((e: any) => e.type === 'fulltime').vt).toBe(5400); expect(ev.find((e: any) => e.type === 'halftime').vt).toBe(2700);
-    const rp = (await app.inject({ method: 'GET', url: `/api/matches/${finished.id}/replay`, headers: H(t) })).json().snapshots; expect(rp.length).toBeGreaterThan(200); expect(rp.at(-1).vt).toBe(5400);
-  });
-  it('history search/filter finds the match', async () => {
-    const h = (await app.inject({ method: 'GET', url: '/api/matches?q=Alpha&status=finished', headers: H(t) })).json().matches; expect(h.map((m: any) => m.id)).toContain(finished.id);
-    expect((await app.inject({ method: 'GET', url: '/api/matches?q=Zzzz', headers: H(t) })).json().matches).toHaveLength(0);
-  });
-  it('deleting a match cascades to dependent rows', async () => {
-    const c = await app.inject({ method: 'POST', url: '/api/matches', headers: H(t), payload: { teamA: team('Del1', { architecture: 'rule' }), teamB: team('Del2', { architecture: 'rule' }), realDurationMinutes: 1, seed: 2, paced: false } });
-    const m = await waitMatch(t, c.json().id); await app.inject({ method: 'DELETE', url: `/api/matches/${m.id}`, headers: H(t) });
-    for (const tb of ['match_events', 'simulation_snapshots', 'team_stats', 'player_stats', 'ai_decisions', 'match_participants']) expect((db.prepare(`SELECT COUNT(*) c FROM ${tb} WHERE match_id=?`).get(m.id) as any).c).toBe(0);
-  });
-});
-
-describe('drawn matches go to a persisted, replayable shootout', () => {
-  it('finds a drawn seed; shootout stored separately from regulation with per-attempt replay', async () => {
-    const t = await reg('gina'); let found: any = null;
-    for (let seed = 1; seed < 12 && !found; seed++) {
-      const c = await app.inject({ method: 'POST', url: '/api/matches', headers: H(t), payload: { teamA: team('P1', { architecture: 'hybrid' }), teamB: team('P2', { architecture: 'hybrid' }), realDurationMinutes: 1, seed, paced: false } });
-      const m = await waitMatch(t, c.json().id); if (m.regulation.a === m.regulation.b) found = m;
+  it('rejects cross-origin match starts and invalid input without starting anything', async () => {
+    const evil = await post('/api/match', body(pc('codex', 'gpt-test'), pc('claude', 'claude-haiku-5-5')), { origin: 'https://evil.example' }); expect(evil.status).toBe(403);
+    for (const bad of [{ ...body(pc('codex', 'gpt-test'), pc('claude', 'claude-haiku-5-5')), minutes: 7 }, body(pc('claude', 'x; rm -rf /'), pc('claude', 'claude-haiku-5-5')), { ...body(pc('codex', 'gpt-test'), pc('claude', 'claude-haiku-5-5')), names: { A: '', B: 'x' } }]) {
+      expect((await post('/api/match', bad)).status).toBe(400);
     }
-    expect(found).toBeTruthy(); expect(found.decidedBy).toBe('shootout'); expect(found.shootout).toBeTruthy(); expect(found.shootout.attempts.length).toBeGreaterThanOrEqual(3);
-    expect(found.winner).toBe(found.shootout.winner); expect(found.regulation.a).toBe(found.regulation.b);
-    expect(found.teamStats.A.goals + found.teamStats.B.goals).toBe(found.regulation.a + found.regulation.b); // shootout goals never added to regulation stats
-    const rep = (await app.inject({ method: 'GET', url: `/api/matches/${found.id}/shootout/1/replay`, headers: H(t) })).json(); expect(rep.frames.length).toBeGreaterThan(5); expect(['goal', 'saved', 'missed', 'post']).toContain(rep.result);
-    const sc = found.shootout.score; expect(found.shootout.attempts.filter((a: any) => a.result === 'goal' && a.team === 'A').length).toBe(sc[0]);
+    expect((await post('/api/match/nope/stop')).status).toBe(404);
   });
 });
 
-describe('live websocket stream', () => {
-  it('streams state and events to the owner only', async () => {
-    const t = await reg('hank'); await app.listen({ port: 0, host: '127.0.0.1' }); const port = (app.server.address() as any).port;
-    const { WebSocket } = await import('ws');
-    const c = await app.inject({ method: 'POST', url: '/api/matches', headers: H(t), payload: { teamA: team('W1', { architecture: 'rule' }), teamB: team('W2', { architecture: 'rule' }), realDurationMinutes: 1, seed: 6, paced: false } });
-    const id = c.json().id; const msgs: any[] = [];
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/matches/${id}?token=${t}`); ws.on('message', (d) => msgs.push(JSON.parse(String(d))));
-    await new Promise((r) => ws.on('open', r)); await waitMatch(t, id); await new Promise((r) => setTimeout(r, 300)); ws.close();
-    expect(msgs[0].t).toBe('hello'); expect(msgs.some((m) => m.t === 'state' && m.vt > 0)).toBe(true); expect(msgs.some((m) => m.t === 'event')).toBe(true);
-    const bad = new WebSocket(`ws://127.0.0.1:${port}/ws/matches/${id}`); const code = await new Promise<number>((r) => bad.on('close', (c2) => r(c2))); expect(code).toBe(4401);
+describe('providers (how models are chosen, like the setup cards)', () => {
+  it('reports exactly Claude Code, Codex and OpenRouter with models and readiness', async () => {
+    const { providers } = (await (await fetch(`${base}/api/providers`)).json()) as { providers: { id: string; ready: boolean; detail: string; models: { id: string }[]; defaultModel: string }[] };
+    const by = Object.fromEntries(providers.map((p) => [p.id, p]));
+    expect(by.claude.ready).toBe(true); expect(by.claude.detail).toMatch(/Signed in/); expect(by.claude.models.map((m) => m.id)).toEqual(CLAUDE_MODELS.map((m) => m.id));
+    expect(by.codex.ready).toBe(true); expect(by.codex.models.map((m) => m.id)).toEqual(['gpt-test', 'gpt-bad']); expect(by.codex.defaultModel).toBe('gpt-test'); // hidden models are not offered
+    expect(by.openrouter.ready).toBe(false); expect(by.openrouter.detail).toMatch(/key/i);
+    expect(Object.keys(by).sort()).toEqual(['claude', 'codex', 'openrouter']); // no built-in coach: only models
+  });
+  it('shows "Not signed in" when the CLI is not logged in', async () => {
+    process.env.FAKE_LOGGED_IN = '0'; const { providers } = (await (await fetch(`${base}/api/providers`)).json()) as { providers: { id: string; ready: boolean; detail: string }[] }; delete process.env.FAKE_LOGGED_IN;
+    expect(providers.find((p) => p.id === 'claude')).toMatchObject({ ready: false, detail: 'Not signed in' });
+  });
+  it('lists the OpenRouter catalogue with prices straight from OpenRouter', async () => {
+    const r = (await (await fetch(`${base}/api/openrouter/models`)).json()) as { models: { id: string; hint?: string }[] };
+    expect(r.models.map((m) => m.id)).toEqual(['openai/gpt-4o-mini', 'free/model']); expect(r.models[0].hint).toBe('$0.15 / $0.60 per 1M'); expect(r.models[1].hint).toBe('Free');
+  });
+  it('resolves script paths to node and never uses a shell', () => { expect(resolveCommand('/tmp/x.cjs')).toEqual({ file: process.execPath, prefix: ['/tmp/x.cjs'] }); });
+});
+
+describe('a match between two models', () => {
+  it('Model vs model: streams state, events and thoughts; the clock runs 00:00 -> 90:00; ends with a full summary', async () => {
+    const { status, json } = await start(body(pc('codex', 'gpt-test'), pc('claude', 'claude-haiku-5-5'))); expect(status).toBe(202);
+    const msgs = await collect(json.id!); const done = msgs.find((m) => m.t === 'done'); expect(done).toBeTruthy();
+    const hello = msgs[0]; expect(hello.t).toBe('hello'); if (hello.t === 'hello') { expect(hello.roster.A).toHaveLength(8); expect(hello.names.A).toBe('Home FC'); }
+    const states = msgs.filter((m) => m.t === 'state'); expect(states.length).toBeGreaterThan(20);
+    const last = states.at(-1)!; if (last.t === 'state') { expect(last.vt).toBe(5400); expect(typeof last.thinking.A).toBe('boolean'); }
+    expect(msgs.some((m) => m.t === 'event')).toBe(true); expect(msgs.filter((m) => m.t === 'thought').length).toBeGreaterThan(4);
+    if (done?.t === 'done') { expect(done.summary.time.virtualSeconds).toBe(5400); expect(done.summary.time.selectedSeconds).toBe(60); expect(done.summary.players).toHaveLength(16); expect(done.summary.teamStats.A.possessionPct + done.summary.teamStats.B.possessionPct).toBeGreaterThanOrEqual(99); expect(['regulation', 'shootout']).toContain(done.summary.decidedBy); }
+  });
+
+  it('Claude Code side: the coach is a real CLI call with the documented flags, and its answer is accepted as tactics', async () => {
+    const rec = join(dir, 'args.json'); process.env.FAKE_RECORD_ARGS = rec;
+    const { json } = await start(body(pc('claude', 'claude-haiku-5-5', 'high'), pc('codex', 'gpt-test')));
+    const msgs = await collect(json.id!); delete process.env.FAKE_RECORD_ARGS;
+    const thoughts = msgs.filter((m): m is Extract<ServerMsg, { t: 'thought' }> => m.t === 'thought' && m.team === 'A');
+    expect(thoughts.length).toBeGreaterThan(0); expect(thoughts.some((t) => t.accepted)).toBe(true); expect(thoughts.every((t) => (t.accepted || /stale/.test(t.reason ?? '')) && t.source === 'llm:claude:claude-haiku-5-5')).toBe(true);
+    const args = JSON.parse(readFileSync(rec, 'utf8')) as string[];
+    expect(args).toEqual(expect.arrayContaining(['-p', '--model', 'claude-haiku-5-5', '--system-prompt', '--tools', '', '--no-session-persistence', '--strict-mcp-config', '--effort', 'high'])); expect(args[args.indexOf('--tools') + 1]).toBe('');
+  });
+
+  it('Codex side: runs `codex exec` read-only and reads the final message from the output file', async () => {
+    const { json } = await start(body(pc('codex', 'gpt-test'), pc('codex', 'gpt-test'))); const msgs = await collect(json.id!);
+    const t = msgs.filter((m): m is Extract<ServerMsg, { t: 'thought' }> => m.t === 'thought' && m.team === 'B'); expect(t.length, JSON.stringify(msgs.filter((m) => m.t === 'error' || (m.t === 'thought' && m.team === 'B')).slice(0, 3))).toBeGreaterThan(0); expect(t.some((x) => x.accepted) && t.every((x) => (x.accepted || /stale/.test(x.reason ?? '')) && x.source === 'llm:codex:gpt-test')).toBe(true);
+  });
+
+  it('OpenRouter side needs a key (from Settings or the server); with one, the model coaches the team', async () => {
+    const no = await start(body(pc('openrouter', 'openai/gpt-4o-mini'), pc('codex', 'gpt-test'))); expect(no.status).toBe(400); expect(no.json.error).toMatch(/OpenRouter API key/);
+    const { json } = await start(body(pc('openrouter', 'openai/gpt-4o-mini'), pc('codex', 'gpt-test'), { openRouterKey: 'sk-or-test-123' })); const msgs = await collect(json.id!);
+    const t = msgs.filter((m): m is Extract<ServerMsg, { t: 'thought' }> => m.t === 'thought' && m.team === 'A'); expect(t.length).toBeGreaterThan(0); expect(t.some((x) => x.accepted) && t.every((x) => x.source === 'llm:openrouter:openai/gpt-4o-mini' && x.tokens === 120 && (x.accepted || /stale/.test(x.reason ?? '')))).toBe(true);
+    expect(JSON.stringify(msgs)).not.toContain('sk-or-test-123'); // the key never comes back to the browser
+  });
+
+  it('a failing provider never stops the match: the team keeps its tactics and the feed says why', async () => {
+    process.env.FAKE_LOGGED_IN = '0'; process.env.CLAUDE_BIN = join(dir, 'missing.cjs');
+    const { json } = await start(body(pc('claude', 'claude-haiku-5-5'), pc('codex', 'gpt-test'))); const msgs = await collect(json.id!); process.env.CLAUDE_BIN = fakeClaude; delete process.env.FAKE_LOGGED_IN;
+    expect(msgs.some((m) => m.t === 'done')).toBe(true); const t = msgs.filter((m): m is Extract<ServerMsg, { t: 'thought' }> => m.t === 'thought' && m.team === 'A');
+    expect(t.length).toBeGreaterThan(0); expect(t.every((x) => !x.accepted && x.reason)).toBe(true); expect(t.every((x) => x.summary.length > 0 && x.strategy === null)).toBe(true); // no built-in coach: the team keeps its current tactics and the thought says why
   });
 });
 
-describe('tournaments and benchmarks', () => {
-  it('round robin standings follow the explicit tie-break policy; every match is persisted', async () => {
-    const t = await reg('ivy'); const teams = ['T1', 'T2', 'T3'].map((n, i) => team(n, { architecture: ['rule', 'utility', 'goap'][i] }));
-    const r = await app.inject({ method: 'POST', url: '/api/tournaments', headers: H(t), payload: { name: 'Cup', format: 'round_robin', teams, realDurationMinutes: 1, seed: 8 } }); expect(r.statusCode).toBe(202);
-    let res: any; for (let i = 0; i < 600; i++) { res = (await app.inject({ method: 'GET', url: `/api/tournaments/${r.json().id}`, headers: H(t) })).json(); if (res.status !== 'running') break; await new Promise((x) => setTimeout(x, 200)); }
-    expect(res.status).toBe('finished'); expect(res.matches).toHaveLength(3); expect(res.result.table).toHaveLength(3); expect(res.result.policy).toMatch(/shootout/);
-    const total = res.result.table.reduce((a: number, x: any) => a + x.points, 0); expect(total).toBe(3 * 3); // every match awards 3 points in total (3-0, 2-1)
-    expect(res.result.champion).toBe(res.result.table[0].name);
+describe('a Codex model the sign-in cannot run', () => {
+  it('is refused before kick-off with a clear message, and the picker flags it and never defaults to it', async () => {
+    const r = await start(body(pc('codex', 'gpt-bad'), pc('claude', 'claude-haiku-5-5')));
+    expect(r.status).toBe(400); expect(r.json.error).toMatch(/cannot use "gpt-bad" with your ChatGPT sign-in/);
+    const list = (await (await fetch(`${base}/api/providers`)).json()) as { providers: { id: string; defaultModel: string; models: { id: string; hint?: string }[] }[] } | { id: string; defaultModel: string; models: { id: string; hint?: string }[] }[];
+    const codex = (Array.isArray(list) ? list : list.providers).find((p) => p.id === 'codex')!;
+    expect(codex.models.find((m) => m.id === 'gpt-bad')?.hint).toMatch(/Not available/); expect(codex.defaultModel).toBe('gpt-test');
   });
-  it('knockout handles byes and best-of-three stops at two wins', async () => {
-    const t = await reg('jack');
-    const k = await app.inject({ method: 'POST', url: '/api/tournaments', headers: H(t), payload: { name: 'KO', format: 'knockout', teams: ['K1', 'K2', 'K3'].map((n) => team(n, { architecture: 'rule' })), realDurationMinutes: 1, seed: 3 } });
-    const b3 = await app.inject({ method: 'POST', url: '/api/tournaments', headers: H(t), payload: { name: 'Bo3', format: 'best_of_three', teams: ['S1', 'S2'].map((n) => team(n, { architecture: 'rule' })), realDurationMinutes: 1, seed: 4 } });
-    for (const id of [k.json().id, b3.json().id]) { let res: any; for (let i = 0; i < 900; i++) { res = (await app.inject({ method: 'GET', url: `/api/tournaments/${id}`, headers: H(t) })).json(); if (res.status !== 'running') break; await new Promise((x) => setTimeout(x, 200)); }
-      expect(res.status).toBe('finished'); expect(res.result.champion).toBeTruthy(); if (res.format === 'knockout') expect(res.matches).toHaveLength(2); else { expect(res.matches.length).toBeGreaterThanOrEqual(2); expect(res.matches.length).toBeLessThanOrEqual(3); } }
+});
+
+describe('pause / resume / stop', () => {
+  it('pausing freezes the clock, resuming continues, and stopping ends the match and kills pending work', async () => {
+    const { app: paced } = await buildApp({ paced: true }); await paced.listen({ port: 0, host: '127.0.0.1' }); const port = (paced.server.address() as { port: number }).port;
+    const url = `http://127.0.0.1:${port}`; const j = { 'content-type': 'application/json' };
+    const { id } = (await (await fetch(`${url}/api/match`, { method: 'POST', headers: j, body: JSON.stringify(body(pc('codex', 'gpt-test'), pc('claude', 'claude-haiku-5-5'))) })).json()) as { id: string };
+    const seen: ServerMsg[] = []; const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/match/${id}`); ws.on('message', (d) => seen.push(JSON.parse(String(d))));
+    await new Promise((r) => setTimeout(r, 1500));
+    await fetch(`${url}/api/match/${id}/pause`, { method: 'POST' }); await new Promise((r) => setTimeout(r, 300));
+    const vtAt = () => { const s = seen.filter((m) => m.t === 'state').at(-1); return s && s.t === 'state' ? s.vt : -1; }; const v1 = vtAt(); await new Promise((r) => setTimeout(r, 700)); const v2 = vtAt();
+    expect(v1).toBeGreaterThan(0); expect(v2).toBe(v1); expect(seen.some((m) => m.t === 'paused' && m.paused)).toBe(true);
+    await fetch(`${url}/api/match/${id}/resume`, { method: 'POST' }); await new Promise((r) => setTimeout(r, 900)); expect(vtAt()).toBeGreaterThan(v2);
+    const stop = await fetch(`${url}/api/match/${id}/stop`, { method: 'POST' }); expect(stop.status).toBe(200); await new Promise((r) => setTimeout(r, 200));
+    const done = seen.find((m) => m.t === 'done'); expect(done && done.t === 'done' && done.summary.decidedBy).toBe('stopped'); ws.close(); await paced.close();
   });
-  it('benchmark: fair seeds, side swapping, metrics documented, small-sample warning', async () => {
-    const t = await reg('kate');
-    const r = await app.inject({ method: 'POST', url: '/api/benchmarks', headers: H(t), payload: { teamA: team('Rule', { architecture: 'rule' }), teamB: team('Util', { architecture: 'utility' }), matches: 2, realDurationMinutes: 1, swapSides: true, seed: 50 } }); expect(r.statusCode).toBe(202);
-    let res: any; for (let i = 0; i < 600; i++) { res = (await app.inject({ method: 'GET', url: `/api/benchmarks/${r.json().id}`, headers: H(t) })).json(); if (res.status !== 'running') break; await new Promise((x) => setTimeout(x, 200)); }
-    expect(res.status).toBe('finished'); const [A, B] = res.result.models; expect(A.matches).toBe(2); expect(A.wins + B.wins).toBe(2); expect(res.result.sampleWarning).toMatch(/anecdotal/); expect(res.result.metricDocs.winRate).toBeTruthy(); expect(res.result.seeds).toEqual([50, 51]);
-    expect(A.costPerMatchUsd).toBe(0); expect(res.result.fairness).toMatch(/swapped/);
-    expect((db.prepare('SELECT SUM(sides_swapped) s FROM benchmark_results WHERE benchmark_id=?').get(r.json().id) as any).s).toBe(1);
-    const an = (await app.inject({ method: 'GET', url: '/api/analytics', headers: H(t) })).json(); expect(an.byArchitecture.length).toBeGreaterThan(0);
-  });
-  it('limits LLM benchmarks to protect the budget', async () => {
-    const t = await reg('lena'); const r = await app.inject({ method: 'POST', url: '/api/benchmarks', headers: H(t), payload: { teamA: team('L', { architecture: 'llm', provider: 'openai', model: 'm' }), teamB: team('R'), matches: 15, realDurationMinutes: 1 } }); expect(r.statusCode).toBe(400);
+});
+
+describe('penalty kicks never spoil the result', () => {
+  it('sends the kick without any outcome and the outcome only after the animation time', async () => {
+    const s = Object.create(MatchSession.prototype) as unknown as { subs: Set<(m: ServerMsg) => void>; control: { paused: boolean; stopped: boolean }; events: unknown[]; thoughts: unknown[]; shootoutMsgs: unknown[]; playKick: (a: unknown, paced: boolean) => Promise<void> };
+    s.subs = new Set(); s.control = { paused: false, stopped: false }; s.events = []; s.thoughts = []; s.shootoutMsgs = [];
+    const log: { m: ServerMsg; at: number }[] = []; const t0 = Date.now(); s.subs.add((m) => log.push({ m, at: Date.now() - t0 }));
+    const attempt = { index: 2, round: 1, team: 'B', suddenDeath: false, takerId: 'B5', keeperId: 'A1', shot: { side: 0.7, height: 0.2, power: 0.8, reason: 'low corner', usedFallback: false }, keeper: { dive: -1, reactDelay: 0.05, reason: 'guess', usedFallback: false }, result: 'goal', scoreAfter: [0, 1], woodwork: false, ballSpeed: 18, ballTarget: { z: 1, y: 0.3 }, frames: [{ t: 0, bx: 14, by: 0.1, bz: 0, kx: 19, kz: 0, tx: 11, tz: 0 }, { t: 0.4, bx: 16, by: 0.2, bz: 0.3, kx: 19, kz: 0.4, tx: 13, tz: 0 }] };
+    const run = s.playKick(attempt, true); await new Promise((r) => setTimeout(r, 150));
+    expect(log.map((x) => x.m.t)).toEqual(['penalty_kick']); // kick is out, result is not
+    const kickJson = JSON.stringify(log[0].m); for (const secret of ['"result"', 'goal', 'saved', 'scoreAfter', 'ballTarget', 'woodwork']) expect(kickJson).not.toContain(secret);
+    await run; const res = log.find((x) => x.m.t === 'penalty_result')!; expect(res.m).toMatchObject({ t: 'penalty_result', result: 'goal', score: [0, 1] }); expect(res.at).toBeGreaterThanOrEqual(1200); // 0.4 s of frames + 0.9 s hold
   });
 });

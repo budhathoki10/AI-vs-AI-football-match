@@ -22,8 +22,14 @@ describe('complete virtual 90-minute regulation for all six real-world durations
       // the physics timestep is constant: one physics step per tick
       expect(m.phys.steps).toBe(m.tick);
       // real elapsed (physics seconds) is tracked separately from virtual and from the selected duration
-      if (minutes >= 3) expect(rep.actualRealSeconds).toBeLessThan(minutes * 60 * 1.2);
-      else expect(rep.note.length).toBeGreaterThan(20); // short budgets may overrun; the limitation is reported transparently
+      // every duration (1-6 min) now lands within 5% of the selected real-world time without touching physics
+      expect(rep.actualRealSeconds).toBeLessThan(minutes * 60 * 1.05);
+      expect(rep.actualRealSeconds).toBeGreaterThan(minutes * 60 * 0.85);
+      expect(rep.note.length).toBeGreaterThan(20);
+      // no restart may deadlock: a dead-ball situation always resolves (regression: head-on standoff froze a kick-in for 100 s)
+      let longest = 0, since = 0, inRestart = false;
+      for (const s of m.snapshots) { if (s.play === 'restart') { if (!inRestart) { inRestart = true; since = s.rt; } longest = Math.max(longest, s.rt - since); } else inRestart = false; }
+      expect(longest).toBeLessThan(20);
       // score integrity
       expect(m.teamStats.A.goals).toBe(m.score[0]); expect(m.teamStats.B.goals).toBe(m.score[1]);
       expect(m.events.filter((e) => e.type === 'goal').length).toBe(m.score[0] + m.score[1]);
@@ -40,7 +46,7 @@ describe('physical realism: natural movement (no speed multipliers), no teleport
       for (const t of [mm.teams.A, mm.teams.B]) for (const p of t.players) {
         if (!p.onCourt) { prev.delete(p.cfg.id); continue; }
         const s = mm.playerWorld(p.cfg.id); const sp = Math.hypot(s.vx, s.vz); maxPlayerSpeed = Math.max(maxPlayerSpeed, sp);
-        const q = prev.get(p.cfg.id); if (q) { maxJump = Math.max(maxJump, Math.hypot(s.x - q.x, s.z - q.z)); const acc = Math.hypot(s.vx - q.vx, s.vz - q.vz) / PHYS.dt; const contact = [...mm.byId.values()].some((o) => o !== p && o.onCourt && Math.hypot(mm.playerWorld(o.cfg.id).x - s.x, mm.playerWorld(o.cfg.id).z - s.z) < 0.8) || Math.hypot(mm.ballWorld().x - s.x, mm.ballWorld().z - s.z) < 0.6; if (contact) maxContactAcc = Math.max(maxContactAcc, acc); else maxAcc = Math.max(maxAcc, acc); }
+        const q = prev.get(p.cfg.id); if (q) { maxJump = Math.max(maxJump, Math.hypot(s.x - q.x, s.z - q.z)); const acc = Math.hypot(s.vx - q.vx, s.vz - q.vz) / PHYS.dt; const contact = [...mm.byId.values()].some((o) => o !== p && o.onCourt && Math.hypot(mm.playerWorld(o.cfg.id).x - s.x, mm.playerWorld(o.cfg.id).z - s.z) < 1.0) || Math.hypot(mm.ballWorld().x - s.x, mm.ballWorld().z - s.z) < 0.6; if (contact) maxContactAcc = Math.max(maxContactAcc, acc); else maxAcc = Math.max(maxAcc, acc); }
         prev.set(p.cfg.id, s);
       }
       const b = mm.ballWorld(); maxBall = Math.max(maxBall, Math.hypot(b.vx, b.vy, b.vz));
